@@ -56,10 +56,10 @@ Berdasarkan dataset `data/Dataset2.csv`:
 - [x] Implementasi sistem logging untuk melacak setiap prediksi yang dilakukan.
 
 ### Milestone 3: Frontend Development (Dashboard Premium)
-- [ ] Inisialisasi Project Web App (Next.js/Vite).
-- [ ] Pembuatan Dashboard Overview dengan grafik distribusi status KKKS.
-- [ ] Halaman "Analisis Stakeholder" dengan input form skor interaktif.
-- [ ] Integrasi visualisasi Decision Tree ke interface web.
+- [x] Inisialisasi Project Web App (Next.js/Vite).
+- [x] Pembuatan Dashboard Overview dengan grafik distribusi status KKKS.
+- [x] Halaman "Analisis Stakeholder" dengan input form skor interaktif.
+- [x] Integrasi visualisasi Decision Tree ke interface web.
 
 ### Milestone 4: Reporting & Explainability
 - [ ] Fitur export hasil analisis ke format PDF untuk laporan manajemen.
