@@ -1,118 +1,147 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 import pandas as pd
 import joblib
 import os
-from train_model import train as train_logic
+import logging
+from datetime import datetime
+
+# Ensure log directory exists before initializing logging
+os.makedirs('logs', exist_ok=True)
+
+# Setup Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("logs/api_usage.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Stakeholder Relationship Monitoring API",
-    description="API untuk memantau hubungan kerja sama stakeholder menggunakan Decision Tree",
-    version="1.0.0"
+    title="Stakeholder Monitoring API (CART)",
+    description="API untuk pemantauan hubungan kerja sama stakeholder menggunakan Decision Tree CART",
+    version="2.0.0"
 )
 
-# Global variables for model and encoders
+# Model paths
+MODEL_PATH = 'models/stakeholder_cart_model.joblib'
+MAPPING_PATH = 'models/label_mapping.joblib'
+
+# Global variables
 model = None
-le_kkks = None
-le_interaksi = None
-le_label = None
+label_mapping = None
+reverse_mapping = None
 
 def load_resources():
-    global model, le_kkks, le_interaksi, le_label
+    global model, label_mapping, reverse_mapping
     try:
-        model = joblib.load('models/decision_tree_model.joblib')
-        le_kkks = joblib.load('models/le_kkks.joblib')
-        le_interaksi = joblib.load('models/le_interaksi.joblib')
-        le_label = joblib.load('models/le_label.joblib')
-        print("Resources loaded successfully.")
-        return True
+        if os.path.exists(MODEL_PATH) and os.path.exists(MAPPING_PATH):
+            model = joblib.load(MODEL_PATH)
+            label_mapping = joblib.load(MAPPING_PATH)
+            reverse_mapping = {v: k for k, v in label_mapping.items()}
+            logger.info("Machine Learning model and mappings loaded successfully.")
+            return True
+        else:
+            logger.warning("Model files not found. Please run training script first.")
+            return False
     except Exception as e:
-        print(f"Error loading resources: {e}")
+        logger.error(f"Error loading resources: {e}")
         return False
 
 @app.on_event("startup")
 async def startup_event():
-    if not os.path.exists('models/decision_tree_model.joblib'):
-        print("Model not found. Training initial model...")
-        train_logic()
     load_resources()
 
+# Schemas
 class PredictionRequest(BaseModel):
-    nama_kkks: str
-    jenis_interaksi: str
-    skor: int
+    nama_kkks: str = Field(..., example="Conrad Asia Energy")
+    skor_komunikasi: float = Field(..., ge=1, le=3, example=3.0)
+    skor_laporan: float = Field(..., ge=1, le=3, example=3.0)
+    skor_rapat: float = Field(..., ge=1, le=3, example=2.5)
+    skor_partisipasi: float = Field(..., ge=1, le=3, example=3.0)
 
 class PredictionResponse(BaseModel):
+    nama_kkks: str
     label: str
     confidence: float
+    timestamp: str
 
 @app.get("/")
-def read_root():
-    return {"message": "Stakeholder Monitoring API is running", "docs": "/docs"}
+def root():
+    return {
+        "status": "online",
+        "model_loaded": model is not None,
+        "docs": "/docs"
+    }
 
 @app.post("/predict", response_model=PredictionResponse)
-def predict(request: PredictionRequest):
+async def predict(request: PredictionRequest):
     if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    
-    try:
-        # Encode inputs
-        # If the value is new, we might need a fallback or re-train
-        try:
-            kkks_encoded = le_kkks.transform([request.nama_kkks])[0]
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Nama KKKS '{request.nama_kkks}' tidak dikenali. Silakan lakukan retraining.")
-            
-        try:
-            interaksi_encoded = le_interaksi.transform([request.jenis_interaksi])[0]
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Jenis Interaksi '{request.jenis_interaksi}' tidak dikenali.")
+        if not load_resources():
+            raise HTTPException(status_code=503, detail="Model is not available.")
 
-        # Prepare features
-        features = pd.DataFrame([[kkks_encoded, interaksi_encoded, request.skor]], 
-                               columns=['Nama KKKS_Encoded', 'Jenis Interaksi_Encoded', 'Skor'])
-        
+    try:
+        # Prepare features in the exact order used during training
+        features = pd.DataFrame([[
+            request.skor_komunikasi,
+            request.skor_laporan,
+            request.skor_rapat,
+            request.skor_partisipasi
+        ]], columns=['Skor_Komunikasi', 'Skor_Laporan', 'Skor_Rapat', 'Skor_Partisipasi'])
+
         # Predict
         pred_encoded = model.predict(features)[0]
-        label = le_label.inverse_transform([pred_encoded])[0]
+        label = reverse_mapping.get(pred_encoded, "Unknown")
         
-        # Probabilities
+        # Get probability
         probs = model.predict_proba(features)[0]
         confidence = float(max(probs))
-        
-        return PredictionResponse(label=label, confidence=confidence)
-    
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/train")
-def retrain():
-    try:
-        train_logic()
-        success = load_resources()
-        if success:
-            return {"message": "Model retrained and reloaded successfully"}
-        else:
-            return {"message": "Model retrained but failed to reload", "error": "Check logs"}
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Log the prediction
+        logger.info(f"Prediction for {request.nama_kkks}: {label} (Conf: {confidence:.2f})")
+
+        return PredictionResponse(
+            nama_kkks=request.nama_kkks,
+            label=label,
+            confidence=confidence,
+            timestamp=timestamp
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error during prediction.")
+
+@app.get("/visualize-tree")
+async def visualize_tree():
+    tree_path = 'reports/decision_tree_visual.png'
+    if os.path.exists(tree_path):
+        return FileResponse(tree_path, media_type="image/png")
+    else:
+        raise HTTPException(status_code=404, detail="Tree visualization image not found. Run training first.")
 
 @app.get("/stats")
-def get_stats():
-    data_path = 'data/Dataset_Monitoring_BPMA_Interaksi_Lengkap.csv'
-    if not os.path.exists(data_path):
+async def get_stats():
+    dataset_path = 'data/Dataset2.csv'
+    if not os.path.exists(dataset_path):
         return {"error": "Dataset not found"}
     
-    df = pd.read_csv(data_path)
-    stats = {
-        "total_interactions": len(df),
-        "total_stakeholders": df['Nama KKKS'].nunique(),
-        "label_distribution": df['Label'].value_counts().to_dict(),
-        "interaction_types": df['Jenis Interaksi'].value_counts().to_dict()
+    df = pd.read_csv(dataset_path)
+    return {
+        "total_records": len(df),
+        "total_kkks": df['Nama KKKS'].nunique(),
+        "label_distribution": df['Label_Akhir'].value_counts().to_dict(),
+        "average_scores": {
+            "Komunikasi": float(df['Skor_Komunikasi'].mean()),
+            "Laporan": float(df['Skor_Laporan'].mean()),
+            "Rapat": float(df['Skor_Rapat'].mean()),
+            "Partisipasi": float(df['Skor_Partisipasi'].mean())
+        }
     }
-    return stats
 
 if __name__ == "__main__":
     import uvicorn
